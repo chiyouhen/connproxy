@@ -44,16 +44,17 @@ async def finish_request(reader, writer):
     await writer.wait_closed() 
 
 async def stream_copy(reader, writer):
+    loop = asyncio.get_running_loop()
     peerinfo = writer.get_extra_info('peername')
     while True:
         if writer.is_closing():
             break
         if reader.at_eof():
             break
-        buf = await reader.read(1024)
+        buf = await asyncio.wait_for(reader.read(1024), timeout=10, loop=loop)
         if len(buf) > 0:
             writer.write(buf)
-            await writer.drain()
+            await asyncio.wait_for(writer.drain(), timeout=10, loop=loop)
             logger.debug('{} byte send to {}'.format(len(buf), peerinfo))
     logger.debug('nothing to send to {}, iocopy finished'.format(peerinfo))
 
@@ -107,7 +108,10 @@ async def on_connected(reader, writer):
     await send_connected(reader, writer)
     logger.debug('connection established with {}:{}'.format(ipaddr, port))
     try:
-        await asyncio.gather(stream_copy(reader, upstream_writer), stream_copy(upstream_reader, writer), loop=loop)
+        try:
+            await asyncio.gather(stream_copy(reader, upstream_writer), stream_copy(upstream_reader, writer), loop=loop)
+        except asyncio.TimeoutError as e:
+            logger.error('socket timeout while processing transfer')
         writer.close()
         upstream_writer.close()
         await asyncio.gather(writer.wait_closed(), upstream_writer.wait_closed(), loop=loop)
