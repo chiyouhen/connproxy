@@ -1,5 +1,5 @@
-# Connect Proxy by with Python3
-I write this for learning python3 asyncio. It is very simple. No exception processing, only some simple lines and functions.
+# Connect Proxy with Python3
+I wrote this for learning work with asyncio in python3. It is very simple. No exception processing, only some simple lines and functions.
 
 # TODO
 1. Try to support all http method?
