@@ -9,14 +9,19 @@ import socket
 import datetime
 
 logger = logging.getLogger('connproxy')
-fmtr = logging.Formatter('[%(asctime)s] %(levelname)-8s <%(process)d:%(threadName)s> %(filename)s:%(lineno)d %(funcName)s - %(message)s')
+fmtr = logging.Formatter(
+    '[%(asctime)s] %(levelname)-8s <%(process)d:%(threadName)s> '
+    '%(filename)s:%(lineno)d %(funcName)s - %(message)s'
+)
 h = logging.StreamHandler(sys.stdout)
 h.setFormatter(fmtr)
 logger.addHandler(h)
 logger.setLevel(logging.DEBUG)
 
 async def send_badrequest(reader, writer):
-    writer.write(b'HTTP/1.0 %d %s\r\n\r\n' % (http.HTTPStatus.BAD_REQUEST.value, http.HTTPStatus.BAD_REQUEST.phrase.encode()))
+    writer.write(b'HTTP/1.0 %d %s\r\n\r\n' % (
+        http.HTTPStatus.BAD_REQUEST.value, http.HTTPStatus.BAD_REQUEST.phrase.encode()
+    ))
 
 async def finish_request(reader, writer):
     await writer.drain()
@@ -24,7 +29,11 @@ async def finish_request(reader, writer):
     await writer.wait_closed() 
 
 async def send_connected(reader, writer):
-    writer.write(b'HTTP/1.0 %d Connection Established\r\nProxy-Agent: connproxy\r\n\r\n' % (http.HTTPStatus.OK.value))
+    writer.write(
+        b'HTTP/1.0 %d Connection Established\r\nProxy-Agent: connproxy\r\n\r\n' % (
+            http.HTTPStatus.OK.value
+        )
+    )
     await writer.drain()
 
 async def stream_copy(reader, writer):
@@ -82,9 +91,10 @@ async def on_connected(reader, writer):
     upstream_writer.close()
     await asyncio.gather(writer.wait_closed(), upstream_writer.wait_closed(), loop=loop)
     request_finished = datetime.datetime.now()
-    logger.info('{} "{}" {}:{} cost:{}(s)'.format(client_peername, protocol_line.decode(), ipaddr, port, (request_finished-request_start).total_seconds()))
-            
-        
+    logger.info('{} "{}" {}:{} cost:{}(s)'.format(
+        client_peername, protocol_line.decode(), ipaddr, port, 
+        (request_finished-request_start).total_seconds()
+    ))
 
 loop = asyncio.get_event_loop()
 coro = asyncio.start_server(on_connected, '127.0.0.1', 11113, loop=loop)
