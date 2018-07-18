@@ -18,23 +18,30 @@ h.setFormatter(fmtr)
 logger.addHandler(h)
 logger.setLevel(logging.DEBUG)
 
+async def send_response(reader, writer, status_code):
+    writer.write(
+        b'HTTP/1.0 %d %s\r\nProxy-Agent: connproxy\r\n\r\n' % (
+            status_code.value, status_code.phrase.encode()
+        )
+    )
+    await writer.drain()
+
 async def send_badrequest(reader, writer):
-    writer.write(b'HTTP/1.0 %d %s\r\n\r\n' % (
-        http.HTTPStatus.BAD_REQUEST.value, http.HTTPStatus.BAD_REQUEST.phrase.encode()
-    ))
+    await send_response(reader, writer, http.HTTPStatus.BAD_REQUEST)
+
+async def send_connected(reader, writer):
+    await send_response(reader, writer, http.HTTPStatus.OK)
+
+async def send_timeout(reader, writer):
+    await send_response(reader, writer, http.HTTPStatus.GATEWAY_TIMEOUT)
+
+async def send_connfailed(reader, writer):
+    await send_response(reader, writer, http.HTTPStatus.BAD_GATEWAY)
 
 async def finish_request(reader, writer):
     await writer.drain()
     writer.close()
     await writer.wait_closed() 
-
-async def send_connected(reader, writer):
-    writer.write(
-        b'HTTP/1.0 %d Connection Established\r\nProxy-Agent: connproxy\r\n\r\n' % (
-            http.HTTPStatus.OK.value
-        )
-    )
-    await writer.drain()
 
 async def stream_copy(reader, writer):
     peerinfo = writer.get_extra_info('peername')
@@ -83,13 +90,29 @@ async def on_connected(reader, writer):
 
     hostinfos = await loop.getaddrinfo(host, port)
     ipaddr, port = hostinfos[0][4]
-    upstream_reader, upstream_writer = await asyncio.open_connection(ipaddr, port, ssl=False, loop=loop)
+    conn_fut = asyncio.open_connection(ipaddr, port, ssl=False, loop=loop)
+    try:
+        upstream_reader, upstream_writer = await asyncio.wait_for(conn_fut, timeout=10, loop=loop)
+    except asyncio.TimeoutError as e:
+        await send_timeout(reader, writer)
+        await finish_request(reader, writer)
+        logger.error('connect {}:{} timeout'.format(ipaddr, port))
+        return 
+    except ConnectionRefusedError as e:
+        await send_connfailed(reader, writer)
+        await finish_request(reader, writer)
+        logger.error('connect {}:{} failed, {}'.format(ipaddr, port, e))
+        return
+        
     await send_connected(reader, writer)
     logger.debug('connection established with {}:{}'.format(ipaddr, port))
-    await asyncio.gather(stream_copy(reader, upstream_writer), stream_copy(upstream_reader, writer), loop=loop)
-    writer.close()
-    upstream_writer.close()
-    await asyncio.gather(writer.wait_closed(), upstream_writer.wait_closed(), loop=loop)
+    try:
+        await asyncio.gather(stream_copy(reader, upstream_writer), stream_copy(upstream_reader, writer), loop=loop)
+        writer.close()
+        upstream_writer.close()
+        await asyncio.gather(writer.wait_closed(), upstream_writer.wait_closed(), loop=loop)
+    except ConnectionError as e:
+        logger.error('connection error while processing transfer')
     request_finished = datetime.datetime.now()
     logger.info('{} "{}" {}:{} cost:{}(s)'.format(
         client_peername, protocol_line.decode(), ipaddr, port, 
