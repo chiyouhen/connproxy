@@ -16,6 +16,7 @@ class Stage(enum.IntEnum):
     NEW = enum.auto()
     CONNECTED = enum.auto()
     HEADER_RECEIVING = enum.auto()
+    BODY_RECEIVING = enum.auto()
     HANDLING = enum.auto()
     RESPONSE_WRITING = enum.auto()
     CLOSING = enum.auto()
@@ -36,10 +37,11 @@ class HTTPRequest:
         self.header_written = False
     
 class HTTPProtocol(asyncio.BufferedProtocol):
-    def __init__(self, chunk_size=4096):
+    def __init__(self, chunk_size=1):
         self.chunk_size = chunk_size
         self._data = b''
         self._buf = None
+        self.buf = None
         self.transport = None
         self._stage = Stage.NEW
         self.request = None
@@ -54,21 +56,26 @@ class HTTPProtocol(asyncio.BufferedProtocol):
         if sizehint == -1:
             sizehint = self.chunk_size
 
-        self._buf = memoryview(b' ' * sizehint)
+        buf = bytearray(sizehint)
+        buf_view = memoryview(buf)
+        self._buf = buf_view[:sizehint]
         return self._buf
 
     def write_header(self):
-        response_line = b'{self.request.status} {http.HTTPStatus(self.request.status).phrase}\r\n'
+        response_line = f'HTTP/1.0 {self.request.status} {http.HTTPStatus(self.request.status).phrase}\r\n'.encode()
         self.transport.write(response_line)
-        for k, v in self.res_headers:
-            self.transport.write(b'{k}: {v}\r\n')
+        for k, v in self.request.res_headers:
+            self.transport.write(f'{k}: {v}\r\n'.encode())
         self.transport.write(b'\r\n')
         self.request.header_written = True
 
     def handle(self):
+        body = b'STATUS OK\r\n'
         self.request.status = http.HTTPStatus.OK
         self.request.res_headers.append(('Server', 'python.asyncio'))
+        self.request.res_headers.append(('Content-Length', len(body)))
         self.write_header()
+        self.transport.write(body)
         self.finalize_request()
 
     def create_request(self):
@@ -90,37 +97,58 @@ class HTTPProtocol(asyncio.BufferedProtocol):
         if not b'\r\n\r\n' in self._data:
             return
 
-        lines = self._data.split(b'\r\n')
+        header_buf, body_buf = self._data.split(b'\r\n\r\n', 1)
+        self.request.body = body_buf
+        lines = header_buf.split(b'\r\n')
+        logger.debug(f'lines: {lines}')
         request_line = lines[0]
         a = request_line.split()
         if len(a) != 3:
             self.finalize_request(http.HTTPStatus.BAD_REQUEST)
 
-        self.request.method = a[0]
+        self.request.method = a[0].decode()
         self.request.request_uri = a[1].decode()
         self.request.http_version = a[2].decode()
+        logger.debug(f'request_line: {request_line}')
 
         for l in lines[1:]:
+            logger.debug(f'header line: {l}')
             k, v = l.split(b':', 1)
             self.request.headers.append((k.decode().strip(), v.decode().strip()))
 
-        self._stage = Stage.HANDLING
-   
+        if self.request.method == 'POST':
+            self._stage = Stage.BODY_RECEIVING
+        else:
+            self._stage = Stage.HANDLING
+
+    def recv_body(self):
+        self.request.body += self.buf
+
     def buffer_updated(self, nbytes):
-        buf = bytes(self._buf)
+        self.buf = bytes(self._buf)
         self._buf = None
-        self._data += buf[:nbytes]
+        self._data += self.buf[:nbytes]
+        logger.debug(f'stage: {self._stage.name}')
         if self._stage == Stage.CONNECTED:
             self.create_request()
 
-        elif self._stage == Stage.HEADER_RECEIVING:
+        if self._stage == Stage.HEADER_RECEIVING:
             self.recv_header()
 
-        elif self._stage == Stage.HANDLING:
+        if self._stage == Stage.BODY_RECEIVING:
+            self.recv_body()
+
+        if self._stage == Stage.HANDLING:
             self.handle()
 
-        elif self._stage == Stage.CLOSING:
+        if self._stage == Stage.CLOSING:
             self.finalize_request()
+
+    def eof_received(self):
+        logger.debug(f'eof_received')
+        if self._stage == Stage.BODY_RECEIVING:
+            self._stage = Stage.HANDLING
+       
 
 if __name__ == '__main__':
     fmtr = logging.Formatter(
