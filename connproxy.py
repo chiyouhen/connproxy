@@ -7,6 +7,7 @@ import http
 import logging
 import socket
 import datetime
+import heapq
 
 logger = logging.getLogger('connproxy')
 fmtr = logging.Formatter(
@@ -17,6 +18,165 @@ h = logging.StreamHandler(sys.stdout)
 h.setFormatter(fmtr)
 logger.addHandler(h)
 logger.setLevel(logging.DEBUG)
+
+class Error(Exception):
+    pass
+
+class HTTPError(Error):
+    def __init__(self, status_code):
+        self.status_code = status_code
+
+    def __str__(self):
+        return 'HTTP {} error, {}'.format(self.status_code.value, self.status_code.phrase)
+
+class HTTPInvalidHeaderError(HTTPError):
+    pass
+
+class HTTPInvalidRequestError(HTTPError):
+    def __init__(self):
+        super().__init__(http.HTTPStatus.BAD_REQUEST)
+
+class Connection:
+    @classmethod
+    async def connect(cls, host, port, *, conn_timeout=None, **kwargs):
+        loop = kwargs['loop'] if 'loop' in kwargs else asyncio.get_event_loop()
+        if conn_timeout is None:
+            conn_timeout = timeout
+        if conn_timeout is None:
+            reader, writer = asyncio.open_connection(host, port)
+        else:
+            reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=conn_timeout.total_seconds())
+        conn = cls(reader, writer, **kwargs)
+        return conn
+
+    def __init__(self, reader, writer, *, timeout=None, read_timeout=None, write_timeout=None, buf_size=4096, loop=None):
+        self.reader = reader
+        self.writer = writer
+        self.timeout = timeout
+        self.read_timeout = read_timeout if not read_timeout is None else timeout
+        self.write_timeout = write_timeout if not write_timeout is None else timeout
+        self.buf_size = buf_size
+        self.loop = loop if not loop is None else asyncio.get_event_loop()
+
+    async def read(self, n=-1):
+        if self.read_timeout is None:
+            return await self.reader.read(n)
+        else:
+            return await asyncio.wait_for(self.reader.read(n), timeout=self.read_timeout.total_seconds(), loop=self.loop)
+
+    def write(self, buf):
+        return self.writer.write(buf)
+
+    async def flush(self):
+        if self.write_timeout is None:
+            return await self.writer.drain()
+        else:
+            return await asyncio.wait_for(self.writer.drain(), timeout=self.write_timeout.total_seconds(), loop=self.loop)
+
+    async def clean_write(self, buf):
+        self.write(buf)
+        return await self.flush()
+
+    def close(self):
+        self.writer.close()
+
+class HTTPHeader:
+    def __init__(self, key, value):
+        self.key_raw = key
+        self.key = self.__key_convert(key)
+        self.value = self.__type_convert(value)
+
+    def __type_convert(self, v):
+        if isinstance(v, str):
+            v = v.encode()
+        elif not isinstance(v, bytes):
+            v = f'{v}'.encode()
+
+        return v
+
+    def __key_convert(self, k):
+        k = self.__type_convert(k)
+        return k.replace(b'-', b'_').lower()
+
+class HTTPHeaders(list):
+    def __init__(self, data=None):
+        super().__init__([])
+        if data is None:
+            return 
+
+        elif isinstance(data, dict):
+            self.__init_from_dict(data)
+        elif isinstance(data, list):
+            self.__init_from_list(data)
+        elif isinstance(data, bytes):
+            self.__init_from_bytes(data)
+        elif isinstance(data, str):
+            self.__init_from_str(data)
+
+    def __init_from_dict(self, data):
+        for k in data:
+            h = HTTPHeader(k, data[k])
+            self.append(h)
+
+    def __init_from_dict(self, data):
+        for k, v in data:
+            h = HTTPHeader(k, v)
+            self.append(h)
+
+    def __init__from_bytes(self, data):
+        lines = data.split(b'\r\n')
+        for l in lines:
+            a = l.split(b':', 1)
+            if len(a) != 2:
+                raise HTTPInvalidHeaderError()
+            k = k.strip()
+            h = HTTPHeader(k, v.strip())
+            self.append(h)
+
+    def __init_from_str(self, data):
+        self.__init__from_types(data.encode())
+
+
+class HTTPRequest:
+    def __init__(self, request_url, method='GET', headers=None, body=None, connection=None):
+        self.request_url = request_url
+        self.url = urllib.parse.urlparse(request_url, allow_fragments=False)
+        self.headers = HTTPHeaders(headers)
+        self.method = method
+        if not isinstance(body, bytes):
+            self.body = body.encode()
+        else:
+            self.body = body
+        self.connection = connection
+
+class HTTP10Connection(Connection):
+    def __init__(self, header_bufsize=4096, chunk_bufsize=4096, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.header_bufsize = header_bufsize
+        self.chunk_bufsize = chunk_bufsize
+        self.header_received = False
+        self.unparsed_header = b''
+        self.body = b''
+        self.headers = {}
+        self.data = b''
+
+    async def recv_header(self):
+        if self.header_received:
+            return self.headers
+
+        buf = self.read(self.header_bufsize)
+        self.data += buf
+        if not b'\r\n\r\n' in data:
+            raise HTTPInvalidRequestError()
+
+        self.unparsed_header, self.body = self.data.split(b'\r\n\r\n')
+            
+
+        
+        
+        
+        
+
 
 async def send_response(reader, writer, status_code):
     writer.write(
