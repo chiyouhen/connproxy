@@ -10,34 +10,22 @@ import datetime
 import heapq
 import enum
 
+from . import web
+
 logger = logging.getLogger('connproxy')
 
 class Stage(enum.IntEnum):
     NEW = enum.auto()
     CONNECTED = enum.auto()
     HEADER_RECEIVING = enum.auto()
-    BODY_RECEIVING = enum.auto()
+    REWRITING = enum.auto()
+    MATCHING_HANDLER = enum.auto()
     HANDLING = enum.auto()
-    RESPONSE_WRITING = enum.auto()
     CLOSING = enum.auto()
     CLOSED = enum.auto()
 
-class HTTPRequest:
-    def __init__(self):
-        self.data = b''
-        self.request_line = b''
-        self.method = ''
-        self.request_uri = ''
-        self.http_version = ''
-        self.headers = []
-        self.body = ''
-        self.transport = None
-        self.status = 0
-        self.res_headers = []
-        self.header_written = False
-    
 class HTTPProtocol(asyncio.BufferedProtocol):
-    def __init__(self, chunk_size=1):
+    def __init__(self, chunk_size=1, rewriter=None, handler=None):
         self.chunk_size = chunk_size
         self._data = b''
         self._buf = None
@@ -45,6 +33,8 @@ class HTTPProtocol(asyncio.BufferedProtocol):
         self.transport = None
         self._stage = Stage.NEW
         self.request = None
+        self.rewriter = rewriter
+        self.router = router
 
     def connection_made(self, transport):
         self.transport = transport
@@ -69,7 +59,15 @@ class HTTPProtocol(asyncio.BufferedProtocol):
         self.transport.write(b'\r\n')
         self.request.header_written = True
 
+    def _post_handling(self, future):
+        self._stage = Stage.CLOSING
+
     def handle(self):
+        loop = asyncio.get_event_loop()
+        future = loop.ensure_future(self.handler.execute())
+        future.add_done_callback(self._post_handling)
+
+    def _handle(self):
         body = b'STATUS OK\r\n'
         self.request.status = http.HTTPStatus.OK
         self.request.res_headers.append(('Server', 'python.asyncio'))
@@ -79,8 +77,9 @@ class HTTPProtocol(asyncio.BufferedProtocol):
         self.finalize_request()
 
     def create_request(self):
-        request = HTTPRequest()
+        request = web.HTTPRequest()
         request.data = self._data
+        request.protocol = self
         self.request = request
         self._stage = Stage.HEADER_RECEIVING
 
@@ -116,13 +115,29 @@ class HTTPProtocol(asyncio.BufferedProtocol):
             k, v = l.split(b':', 1)
             self.request.headers.append((k.decode().strip(), v.decode().strip()))
 
-        if self.request.method == 'POST':
-            self._stage = Stage.BODY_RECEIVING
-        else:
-            self._stage = Stage.HANDLING
+        self._stage = Stage.REWRITING
 
     def recv_body(self):
         self.request.body += self.buf
+
+    async def recv_body_chunk(self):
+        loop = asyncio.get_event_loop()
+        future = loop.create_future()
+        self.add_buffer_updated_future(future)
+        return await future
+
+    def rewrite(self):
+        if not self.rewriter is None:
+            self.rewriter.execute(self.request)
+        self._stage = Stage.MATCHING_HANDLER
+
+    def match_handler(self):
+        if not self.router is None:
+            Handler = self.router.execute(self.request)
+            self.handler = Handler(self.request, self.transport)
+        else:
+            self.handler = web.HandlerNotFound(self.request, self.transport)
+        self._stage = Stage.HANDLING
 
     def buffer_updated(self, nbytes):
         self.buf = bytes(self._buf)
@@ -149,26 +164,4 @@ class HTTPProtocol(asyncio.BufferedProtocol):
         if self._stage == Stage.BODY_RECEIVING:
             self._stage = Stage.HANDLING
        
-
-if __name__ == '__main__':
-    fmtr = logging.Formatter(
-        '[%(asctime)s] %(levelname)-8s <%(process)d:%(threadName)s> '
-        '%(filename)s:%(lineno)d %(funcName)s - %(message)s'
-    )
-    h = logging.StreamHandler(sys.stdout)
-    h.setFormatter(fmtr)
-    logger.addHandler(h)
-    logger.setLevel(logging.DEBUG)
-    loop = asyncio.get_event_loop()
-    co = loop.create_server(HTTPProtocol, '127.0.0.1', 8999)
-    server = loop.run_until_complete(co)
-    try:
-        loop.run_forever()
-    except KeyboardInterrupt as e:
-        pass
-
-    server.close()
-    loop.run_until_complete(server.wait_closed())
-    loop.close()
-     
 
